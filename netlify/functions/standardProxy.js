@@ -4,14 +4,14 @@
 const fetch = require('node-fetch');
 
 exports.handler = async (event, context) => {
-  // 1) Handle OPTIONS requests for CORS preflight
+  // 1) Handle OPTIONS requests for CORS preflight.
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 200,
       headers: {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type'
+        'Access-Control-Allow-Headers': 'Content-Type, Accept'
       },
       body: ''
     };
@@ -22,45 +22,64 @@ exports.handler = async (event, context) => {
   const GAS_BASE_URL = 'https://script.google.com/macros/s/AKfycbx3V8rnrRZKpAVPszdWRjx5qDCJe1I6YIeG84JqGxGarJ9srIzTvhZX81UF0G01d7Py-g/exec';
 
   try {
-    // 3) Construct the final URL including any query parameters
+    // 3) Construct final URL including query parameters.
     const params = new URLSearchParams(event.queryStringParameters).toString();
     const gasUrl = params ? `${GAS_BASE_URL}?${params}` : GAS_BASE_URL;
 
-    // 4) Prepare fetch options based on the incoming request
+    // 4) Prepare fetch options, adding an Accept header to request JSON.
     const fetchOptions = {
       method: event.httpMethod,
-      headers: {}
+      headers: {
+        'Accept': 'application/json'
+      }
     };
 
-    // If it's a POST request, forward the JSON body and set the header accordingly.
+    // If it's a POST, forward the request body & set the Content-Type header.
     if (event.httpMethod === 'POST') {
       fetchOptions.headers['Content-Type'] = 'application/json';
-      fetchOptions.body = event.body; // Forward the raw JSON string
+      fetchOptions.body = event.body; // raw JSON string
     }
 
-    // 5) Forward the request to the GAS endpoint
+    // 5) Forward the request to the GAS endpoint.
     const response = await fetch(gasUrl, fetchOptions);
-    const text = await response.text(); // Use text() to capture the response
+    const text = await response.text();
 
-    // 6) Return the final response with the necessary CORS headers
+    // 6) If the response starts with '<', it's likely HTML (an error or fallback page).
+    if (text.trim().startsWith('<')) {
+      console.error("Received HTML instead of JSON from GAS:", text);
+      return {
+        statusCode: 500,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Accept'
+        },
+        body: JSON.stringify({
+          error: "Invalid response from GAS endpoint",
+          details: text
+        })
+      };
+    }
+
+    // 7) Return the GAS response with proper CORS headers.
     return {
       statusCode: 200,
       headers: {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type'
+        'Access-Control-Allow-Headers': 'Content-Type, Accept'
       },
       body: text
     };
 
   } catch (err) {
-    // On error, return a 500 with CORS headers
+    // 8) On error, return an error response with CORS headers.
     return {
       statusCode: 500,
       headers: {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type'
+        'Access-Control-Allow-Headers': 'Content-Type, Accept'
       },
       body: JSON.stringify({ error: err.message })
     };
