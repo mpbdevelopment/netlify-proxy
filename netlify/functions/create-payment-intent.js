@@ -7,6 +7,9 @@ exports.handler = async function (event, context) {
     if (event.httpMethod !== 'POST') {
       return {
         statusCode: 405,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+        },
         body: JSON.stringify({ error: 'Method not allowed' }),
       };
     }
@@ -18,6 +21,9 @@ exports.handler = async function (event, context) {
     if (!amountInCents) {
       return {
         statusCode: 400,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+        },
         body: JSON.stringify({ error: 'Missing amountInCents' }),
       };
     }
@@ -32,12 +38,18 @@ exports.handler = async function (event, context) {
 
     return {
       statusCode: 200,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+      },
       body: JSON.stringify({ clientSecret: paymentIntent.client_secret }),
     };
   } catch (error) {
     console.error('Error creating payment intent:', error);
     return {
       statusCode: 500,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+      },
       body: JSON.stringify({ error: 'Server error' }),
     };
   }
