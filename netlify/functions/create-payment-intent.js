@@ -1,6 +1,5 @@
 // netlify/functions/create-payment-intent.js
 
-require('dotenv').config(); // If needed for local dev
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 exports.handler = async function (event, context) {
