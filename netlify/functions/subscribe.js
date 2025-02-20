@@ -53,25 +53,22 @@ exports.handler = async (event, context) => {
 
     if (now < april7) {
       // For registrations before April 7, use a Subscription Schedule with two phases:
-      // Phase 1: Charges $175 immediately for the period until May 7.
-      // Phase 2: Starts on May 7 and bills monthly.
+      // Phase 1: Charges $175 immediately and covers the period until May 7.
+      // Phase 2: Automatically starts on May 7 with recurring monthly billing.
       result = await stripe.subscriptionSchedules.create({
         customer: customer.id,
         start_date: 'now',
         end_behavior: 'release',
         phases: [
           {
-            // Phase 1: Immediate charge for the first month
+            // Phase 1: Immediate charge for the period until May 7
             items: [{ price: process.env.STRIPE_PRICE_ID }],
-            // This phase ends on May 7 so that the next phase takes over.
-            end_date: may7Timestamp,
-            // No trial period here so the charge happens immediately.
+            end_date: may7Timestamp,  // Phase 1 ends on May 7
           },
           {
-            // Phase 2: Recurring monthly billing starting May 7
+            // Phase 2: Recurring monthly billing starting automatically after May 7
             items: [{ price: process.env.STRIPE_PRICE_ID }],
-            start_date: may7Timestamp,
-            // This phase will continue indefinitely (or until you update/cancel).
+            // No start_date here; it begins immediately after phase 1 ends
           },
         ],
       });
