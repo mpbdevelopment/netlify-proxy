@@ -31,7 +31,7 @@ exports.handler = async (event, context) => {
     const { email, prepayMonths, paymentMethodId } = JSON.parse(event.body);
     const now = new Date();
 
-    // Determine the billing cycle anchor based on the current date
+    // Determine the billing cycle anchor based on the current date.
     // April 7 is represented as (month index 3, since months are 0-indexed)
     const april7 = new Date(now.getFullYear(), 3, 7);
     let billingCycleAnchor;
@@ -66,10 +66,13 @@ exports.handler = async (event, context) => {
       });
     }
 
-    // Create the subscription with the calculated billing cycle anchor
+    // Create the subscription using the $175/month subscription item.
+    // Ensure STRIPE_PRICE_ID is set to the Price ID of your $175/month plan.
     const subscription = await stripe.subscriptions.create({
       customer: customer.id,
-      items: [{ price: process.env.STRIPE_PRICE_ID }],
+      items: [
+        { price: process.env.STRIPE_PRICE_ID }
+      ],
       billing_cycle_anchor: anchorTimestamp,
       proration_behavior: 'none',
       expand: ['latest_invoice.payment_intent'],
