@@ -1,5 +1,5 @@
 // subscribe.js (Netlify Function)
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const stripe = require('stripe')(process.env.STRIPE_TEST_KEY);
 const admin = require('firebase-admin');
 
 // Initialize Firebase Admin SDK if not already initialized.
