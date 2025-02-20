@@ -10,29 +10,50 @@ if (!admin.apps.length) {
   });
 }
 
+// Set CORS headers to allow cross-origin requests
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*", // For production, replace "*" with your domain
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
 exports.handler = async (event, context) => {
+  // Handle CORS preflight requests
+  if (event.httpMethod === "OPTIONS") {
+    return {
+      statusCode: 200,
+      headers: corsHeaders,
+      body: "OK",
+    };
+  }
+
   try {
+    // Parse incoming request body
     const { email, prepayMonths, paymentMethodId } = JSON.parse(event.body);
     const now = new Date();
 
-    // Determine the cutoff date: April 7 of the current year
-    const april7 = new Date(now.getFullYear(), 3, 7); // Note: month is 0-indexed (3 = April)
+    // Determine the billing cycle anchor based on the current date
+    // April 7 is represented as (month index 3, since months are 0-indexed)
+    const april7 = new Date(now.getFullYear(), 3, 7);
     let billingCycleAnchor;
 
     if (now < april7) {
-      // For early purchasers: first month is charged immediately and next billing on May 7.
-      billingCycleAnchor = new Date(now.getFullYear(), 4, 7); // May 7 (month 4 = May)
+      // For purchases before April 7, charge immediately and set next billing on May 7
+      billingCycleAnchor = new Date(now.getFullYear(), 4, 7); // May 7 (month index 4)
       if (prepayMonths > 1) {
-        // Extend the anchor by additional 30-day periods for extra months
-        billingCycleAnchor = new Date(billingCycleAnchor.getTime() + (prepayMonths - 1) * 30 * 24 * 60 * 60 * 1000);
+        // Extend the anchor for additional pre-paid months (each additional month = 30 days)
+        billingCycleAnchor = new Date(
+          billingCycleAnchor.getTime() + (prepayMonths - 1) * 30 * 24 * 60 * 60 * 1000
+        );
       }
     } else {
-      // For purchases on/after April 7, set anchor to now plus (prepayMonths x 30 days)
-      billingCycleAnchor = new Date(now.getTime() + prepayMonths * 30 * 24 * 60 * 60 * 1000);
+      // For purchases on or after April 7, add (prepayMonths × 30 days) to the current date
+      billingCycleAnchor = new Date(
+        now.getTime() + prepayMonths * 30 * 24 * 60 * 60 * 1000
+      );
     }
     const anchorTimestamp = Math.floor(billingCycleAnchor.getTime() / 1000);
 
-    // Create or retrieve a Stripe customer using the provided email.
+    // Retrieve or create a Stripe customer based on the provided email
     let customer;
     const customers = await stripe.customers.list({ email, limit: 1 });
     if (customers.data.length > 0) {
@@ -45,8 +66,7 @@ exports.handler = async (event, context) => {
       });
     }
 
-    // Create the subscription with the desired billing cycle anchor.
-    // The subscription will charge immediately for the period until the anchor date.
+    // Create the subscription with the calculated billing cycle anchor
     const subscription = await stripe.subscriptions.create({
       customer: customer.id,
       items: [{ price: process.env.STRIPE_PRICE_ID }],
@@ -55,7 +75,7 @@ exports.handler = async (event, context) => {
       expand: ['latest_invoice.payment_intent'],
     });
 
-    // Log subscription details into Firebase Realtime Database.
+    // Log subscription details to Firebase Realtime Database
     const db = admin.database();
     const ref = db.ref('subscriptions').push();
     await ref.set({
@@ -64,17 +84,19 @@ exports.handler = async (event, context) => {
       subscriptionId: subscription.id,
       paidThrough: billingCycleAnchor.toISOString(),
       created: now.toISOString(),
-      // You can add more details such as invoice payment timestamps, etc.
+      // Optionally, include more data such as payment timestamps, etc.
     });
 
     return {
       statusCode: 200,
+      headers: corsHeaders,
       body: JSON.stringify({ subscriptionId: subscription.id }),
     };
   } catch (error) {
-    console.error('Error creating subscription:', error);
+    console.error("Error creating subscription:", error);
     return {
       statusCode: 500,
+      headers: corsHeaders,
       body: JSON.stringify({ error: error.message }),
     };
   }
