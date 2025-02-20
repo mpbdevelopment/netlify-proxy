@@ -12,7 +12,7 @@ if (!admin.apps.length) {
 
 // Set CORS headers to allow cross-origin requests
 const corsHeaders = {
-  "Access-Control-Allow-Origin": "*", // For production, replace "*" with your domain
+  "Access-Control-Allow-Origin": "*", // In production, replace "*" with your domain
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
@@ -27,33 +27,16 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    // Parse incoming request body
-    const { email, prepayMonths, paymentMethodId } = JSON.parse(event.body);
+    // Parse incoming request
+    const { email, paymentMethodId } = JSON.parse(event.body);
     const now = new Date();
 
-    // Determine the billing cycle anchor based on the current date.
-    // April 7 is represented as (month index 3, since months are 0-indexed)
-    const april7 = new Date(now.getFullYear(), 3, 7);
-    let billingCycleAnchor;
+    // Define April 7 and May 7 for the current year
+    const april7 = new Date(now.getFullYear(), 3, 7); // month index 3 = April
+    const may7 = new Date(now.getFullYear(), 4, 7);   // month index 4 = May
+    const may7Timestamp = Math.floor(may7.getTime() / 1000);
 
-    if (now < april7) {
-      // For purchases before April 7, charge immediately and set next billing on May 7
-      billingCycleAnchor = new Date(now.getFullYear(), 4, 7); // May 7 (month index 4)
-      if (prepayMonths > 1) {
-        // Extend the anchor for additional pre-paid months (each additional month = 30 days)
-        billingCycleAnchor = new Date(
-          billingCycleAnchor.getTime() + (prepayMonths - 1) * 30 * 24 * 60 * 60 * 1000
-        );
-      }
-    } else {
-      // For purchases on or after April 7, add (prepayMonths × 30 days) to the current date
-      billingCycleAnchor = new Date(
-        now.getTime() + prepayMonths * 30 * 24 * 60 * 60 * 1000
-      );
-    }
-    const anchorTimestamp = Math.floor(billingCycleAnchor.getTime() / 1000);
-
-    // Retrieve or create a Stripe customer based on the provided email
+    // Retrieve or create a Stripe customer based on email
     let customer;
     const customers = await stripe.customers.list({ email, limit: 1 });
     if (customers.data.length > 0) {
@@ -66,37 +49,59 @@ exports.handler = async (event, context) => {
       });
     }
 
-    // Create the subscription using the $175/month subscription item.
-    // Ensure STRIPE_PRICE_ID is set to the Price ID of your $175/month plan.
-    const subscription = await stripe.subscriptions.create({
-      customer: customer.id,
-      items: [
-        { price: process.env.STRIPE_PRICE_ID }
-      ],
-      billing_cycle_anchor: anchorTimestamp,
-      proration_behavior: 'none',
-      expand: ['latest_invoice.payment_intent'],
-    });
+    let result;
 
-    // Log subscription details to Firebase Realtime Database
+    if (now < april7) {
+      // For registrations before April 7, use a Subscription Schedule with two phases:
+      // Phase 1: Charges $175 immediately for the period until May 7.
+      // Phase 2: Starts on May 7 and bills monthly.
+      result = await stripe.subscriptionSchedules.create({
+        customer: customer.id,
+        start_date: 'now',
+        end_behavior: 'release',
+        phases: [
+          {
+            // Phase 1: Immediate charge for the first month
+            items: [{ price: process.env.STRIPE_PRICE_ID }],
+            // This phase ends on May 7 so that the next phase takes over.
+            end_date: may7Timestamp,
+            // No trial period here so the charge happens immediately.
+          },
+          {
+            // Phase 2: Recurring monthly billing starting May 7
+            items: [{ price: process.env.STRIPE_PRICE_ID }],
+            start_date: may7Timestamp,
+            // This phase will continue indefinitely (or until you update/cancel).
+          },
+        ],
+      });
+    } else {
+      // For registrations on or after April 7, create a standard immediate subscription.
+      result = await stripe.subscriptions.create({
+        customer: customer.id,
+        items: [{ price: process.env.STRIPE_PRICE_ID }],
+        expand: ['latest_invoice.payment_intent'],
+      });
+    }
+
+    // Log details to Firebase Realtime Database.
     const db = admin.database();
     const ref = db.ref('subscriptions').push();
     await ref.set({
       email,
       customerId: customer.id,
-      subscriptionId: subscription.id,
-      paidThrough: billingCycleAnchor.toISOString(),
+      subscriptionScheduleId: result.id,
       created: now.toISOString(),
-      // Optionally, include more data such as payment timestamps, etc.
     });
 
     return {
       statusCode: 200,
       headers: corsHeaders,
-      body: JSON.stringify({ subscriptionId: subscription.id }),
+      body: JSON.stringify({ subscriptionScheduleId: result.id }),
     };
+
   } catch (error) {
-    console.error("Error creating subscription:", error);
+    console.error("Error creating subscription schedule:", error);
     return {
       statusCode: 500,
       headers: corsHeaders,
@@ -104,3 +109,4 @@ exports.handler = async (event, context) => {
     };
   }
 };
+
