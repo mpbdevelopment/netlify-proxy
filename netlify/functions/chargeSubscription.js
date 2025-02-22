@@ -1,6 +1,10 @@
 const stripePackage = require('stripe');
 const admin = require('firebase-admin');
 
+function encodeEmailForFirebase(email) {
+  return email.replaceAll('.', ',');
+}
+
 // CORS helper
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -55,7 +59,7 @@ exports.handler = async (event, context) => {
       };
     }
 
-    const userRef = db.ref(`users/${encodeURIComponent(email)}`);
+    const userRef = db.ref(`users/${encodeEmailForFirebase(email)}`);
     const snapshot = await userRef.once('value');
     const userData = snapshot.val();
 
