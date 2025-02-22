@@ -62,7 +62,6 @@ exports.handler = async (event, context) => {
       currency: 'usd',
       payment_method: paymentMethodId,
       customer: customerId,        // <--- Critical to match attached PM
-      confirmation_method: 'manual', 
       confirm: false,
       // Optionally: receipt_email, description, metadata, etc.
     });
