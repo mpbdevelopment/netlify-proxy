@@ -1,6 +1,13 @@
 const stripePackage = require('stripe');
 const admin = require('firebase-admin');
 
+// CORS helper
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+};
+
 let app;
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(
@@ -15,26 +22,37 @@ if (!admin.apps.length) {
 const db = admin.database();
 const stripe = stripePackage(process.env.STRIPE_TEST_KEY);
 
-// Hardcoded monthly price in cents (example: $10.00 = 1000 cents)
+// Hardcoded monthly price (or use another ENV var if you prefer)
 const DEFAULT_MONTHLY_PRICE = process.env.MONTHLY_PRICE_IN_CENTS
   ? parseInt(process.env.MONTHLY_PRICE_IN_CENTS, 10)
-  : 1000; // fallback to $10 if env variable not set
+  : 1000; // $10.00
 
 exports.handler = async (event, context) => {
-  try {
-    if (event.httpMethod !== 'POST') {
-      return {
-        statusCode: 405,
-        body: JSON.stringify({ error: 'Method Not Allowed' }),
-      };
-    }
+  // Handle preflight OPTIONS
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 200,
+      headers: CORS_HEADERS,
+      body: 'OK',
+    };
+  }
 
+  if (event.httpMethod !== 'POST') {
+    return {
+      statusCode: 405,
+      headers: CORS_HEADERS,
+      body: JSON.stringify({ error: 'Method Not Allowed' }),
+    };
+  }
+
+  try {
     const body = JSON.parse(event.body || '{}');
     const { email, monthsToAdd } = body;
 
     if (!email || !monthsToAdd) {
       return {
         statusCode: 400,
+        headers: CORS_HEADERS,
         body: JSON.stringify({ error: 'Missing email or monthsToAdd' }),
       };
     }
@@ -46,43 +64,42 @@ exports.handler = async (event, context) => {
     if (!userData) {
       return {
         statusCode: 404,
+        headers: CORS_HEADERS,
         body: JSON.stringify({ error: 'User not found in Firebase' }),
       };
     }
 
-    const { stripeCustomerId, status, paidUntil } = userData;
-
+    const { stripeCustomerId, paidUntil } = userData;
     if (!stripeCustomerId) {
       return {
         statusCode: 400,
+        headers: CORS_HEADERS,
         body: JSON.stringify({ error: 'User has no Stripe customer ID' }),
       };
     }
 
-    // Calculate total charge amount
+    // Calculate total price
     const totalAmount = DEFAULT_MONTHLY_PRICE * monthsToAdd;
 
-    // Create a PaymentIntent in Stripe
+    // Create PaymentIntent
     const paymentIntent = await stripe.paymentIntents.create({
       amount: totalAmount,
       currency: 'usd',
       customer: stripeCustomerId,
       payment_method_types: ['card'],
-      off_session: true,     // Indicates we might be charging without the user present
-      confirm: true,         // Attempt to confirm the payment immediately
+      off_session: true, // user is not actively in the checkout
+      confirm: true,     // attempt to confirm immediately
       description: `Subscription charge for ${monthsToAdd} month(s)`,
       metadata: {
         email,
-        monthsToAdd
-      }
+        monthsToAdd,
+      },
     });
 
-    // If payment fails or requires action, Stripe will throw an error
-    // If success, update the user’s subscription info
+    // If successful, update paidUntil
     const now = new Date();
     let newPaidUntil = now;
 
-    // If the user is currently paid through some date, start from that date if it's in the future
     if (paidUntil) {
       const paidUntilDate = new Date(paidUntil);
       if (paidUntilDate > now) {
@@ -90,31 +107,29 @@ exports.handler = async (event, context) => {
       }
     }
 
-    // Add (30 days * monthsToAdd) to the paidUntil date
-    const daysToAdd = 30 * monthsToAdd;
-    newPaidUntil.setDate(newPaidUntil.getDate() + daysToAdd);
+    // Add 30 days * monthsToAdd
+    newPaidUntil.setDate(newPaidUntil.getDate() + (30 * monthsToAdd));
 
-    // Update Firebase
     await userRef.update({
       status: 'Active',
-      paidUntil: newPaidUntil.toISOString()
+      paidUntil: newPaidUntil.toISOString(),
     });
 
     return {
       statusCode: 200,
+      headers: CORS_HEADERS,
       body: JSON.stringify({
         message: 'Payment successful, subscription extended',
         paymentIntentId: paymentIntent.id,
-        newPaidUntil: newPaidUntil.toISOString()
+        newPaidUntil: newPaidUntil.toISOString(),
       }),
     };
   } catch (err) {
     console.error('Error charging for subscription', err);
-
-    // If payment fails, optionally mark user as Inactive
-    // But that might be only for auto-renewal. For manual extends, the user might remain Inactive if they never had an active subscription in the first place.
+    // Optional: Mark user as inactive if needed
     return {
       statusCode: 500,
+      headers: CORS_HEADERS,
       body: JSON.stringify({ error: err.message }),
     };
   }
