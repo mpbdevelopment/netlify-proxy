@@ -21,7 +21,7 @@ if (!admin.apps.length) {
 const db = admin.database();
 
 // Initialize Stripe
-const stripe = stripePackage(process.env.STRIPE_SECRET_KEY);
+const stripe = stripePackage(process.env.STRIPE_TEST_KEY);
 
 exports.handler = async (event, context) => {
   try {
