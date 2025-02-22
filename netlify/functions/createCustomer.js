@@ -14,7 +14,7 @@ if (!admin.apps.length) {
   );
   app = admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
-    databaseURL: 'https://<YOUR_FIREBASE_PROJECT_ID>.firebaseio.com' 
+    databaseURL: process.env.FIREBASE_DATABASE_URL,
   });
 }
 
