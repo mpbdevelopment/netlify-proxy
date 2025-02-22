@@ -1,30 +1,30 @@
 const stripePackage = require('stripe');
 const admin = require('firebase-admin');
 
-// CORS helper: Reusable headers
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
+function encodeEmailForFirebase(email) {
+  return email.replaceAll('.', ',');
+}
+
 let app;
 if (!admin.apps.length) {
-  // Decode base64 service account JSON (if you're storing it in an ENV variable)
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   app = admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
-    databaseURL: process.env.FIREBASE_DATABASE_URL, // e.g. "https://<YOUR_FIREBASE_PROJECT_ID>.firebaseio.com"
+    databaseURL: process.env.FIREBASE_DATABASE_URL,
   });
 }
 
 const db = admin.database();
-
-// Use your test key from environment vars
 const stripe = stripePackage(process.env.STRIPE_TEST_KEY);
 
 exports.handler = async (event, context) => {
-  // Handle preflight OPTIONS
+  // Handle OPTIONS for CORS
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 200,
@@ -43,8 +43,7 @@ exports.handler = async (event, context) => {
 
   try {
     const body = JSON.parse(event.body || '{}');
-    const { email, name } = body; // email is your user identifier
-
+    const { email, name } = body;
     if (!email) {
       return {
         statusCode: 400,
@@ -53,14 +52,18 @@ exports.handler = async (event, context) => {
       };
     }
 
-    const userRef = db.ref(`users/${encodeURIComponent(email)}`);
+    // Encode the email for the Firebase key
+    const encodedEmailKey = encodeEmailForFirebase(email);
+
+    // Reference the DB path with the encoded email
+    const userRef = db.ref(`users/${encodedEmailKey}`);
     const snapshot = await userRef.once('value');
     const userData = snapshot.val();
 
-    // If user doesn't exist, create a minimal record
     if (!userData) {
+      // Create a minimal record, storing the *real* email inside
       await userRef.set({
-        email,
+        email,   // store actual email so we don’t lose the dot
         name: name || '',
         status: 'Inactive',
         paidUntil: '',
@@ -68,11 +71,11 @@ exports.handler = async (event, context) => {
       });
     }
 
-    // Reload user data
+    // Reload user data after we potentially created it
     const updatedSnapshot = await userRef.once('value');
     const updatedUserData = updatedSnapshot.val();
 
-    // If user already has a Stripe customer ID, return it
+    // If they already have a stripeCustomerId, return it
     if (updatedUserData.stripeCustomerId) {
       return {
         statusCode: 200,
@@ -84,13 +87,13 @@ exports.handler = async (event, context) => {
       };
     }
 
-    // Otherwise, create a new Customer in Stripe
+    // Create a Stripe customer using the actual email
     const customer = await stripe.customers.create({
       email,
       name,
     });
 
-    // Save to Firebase
+    // Save the stripeCustomerId
     await userRef.update({
       stripeCustomerId: customer.id,
     });
@@ -104,7 +107,7 @@ exports.handler = async (event, context) => {
       }),
     };
   } catch (err) {
-    console.error('Error creating Stripe customer', err);
+    console.error('Error in createCustomer:', err);
     return {
       statusCode: 500,
       headers: CORS_HEADERS,
