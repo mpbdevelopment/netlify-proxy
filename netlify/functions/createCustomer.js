@@ -1,65 +1,76 @@
-const { NetlifySecrets, schedule } = require('@netlify/functions'); // For standard function exports
 const stripePackage = require('stripe');
 const admin = require('firebase-admin');
 
-/**
- * Initialize Firebase Admin
- * (You can also do this in a shared helper file and import it in each function.)
- */
+// CORS helper: Reusable headers
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+};
+
 let app;
 if (!admin.apps.length) {
-  // For the sake of an example, we assume FIREBASE_SERVICE_ACCOUNT is a Base64-encoded JSON
+  // Decode base64 service account JSON (if you're storing it in an ENV variable)
   const serviceAccount = JSON.parse(
     Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT, 'base64').toString()
   );
   app = admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
-    databaseURL: process.env.FIREBASE_DATABASE_URL,
+    databaseURL: process.env.FIREBASE_DATABASE_URL, // e.g. "https://<YOUR_FIREBASE_PROJECT_ID>.firebaseio.com"
   });
 }
 
 const db = admin.database();
 
-// Initialize Stripe
+// Use your test key from environment vars
 const stripe = stripePackage(process.env.STRIPE_TEST_KEY);
 
 exports.handler = async (event, context) => {
-  try {
-    // Only allow POST
-    if (event.httpMethod !== 'POST') {
-      return {
-        statusCode: 405,
-        body: JSON.stringify({ error: 'Method Not Allowed' }),
-      };
-    }
+  // Handle preflight OPTIONS
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 200,
+      headers: CORS_HEADERS,
+      body: 'OK',
+    };
+  }
 
+  if (event.httpMethod !== 'POST') {
+    return {
+      statusCode: 405,
+      headers: CORS_HEADERS,
+      body: JSON.stringify({ error: 'Method Not Allowed' }),
+    };
+  }
+
+  try {
     const body = JSON.parse(event.body || '{}');
-    const { email, name } = body;  // Email is the user identifier in Firebase
+    const { email, name } = body; // email is your user identifier
 
     if (!email) {
       return {
         statusCode: 400,
+        headers: CORS_HEADERS,
         body: JSON.stringify({ error: 'Missing required parameter: email' }),
       };
     }
 
-    // Reference to user record in Firebase Realtime DB
     const userRef = db.ref(`users/${encodeURIComponent(email)}`);
     const snapshot = await userRef.once('value');
     const userData = snapshot.val();
 
-    // If user doesn't exist yet in DB, create a minimal record
+    // If user doesn't exist, create a minimal record
     if (!userData) {
       await userRef.set({
         email,
         name: name || '',
-        status: 'Inactive',        // default to Inactive until payment
-        paidUntil: '',            // no subscription yet
+        status: 'Inactive',
+        paidUntil: '',
         stripeCustomerId: '',
       });
     }
 
-    // Reload user data (or do an if/else above)
+    // Reload user data
     const updatedSnapshot = await userRef.once('value');
     const updatedUserData = updatedSnapshot.val();
 
@@ -67,9 +78,10 @@ exports.handler = async (event, context) => {
     if (updatedUserData.stripeCustomerId) {
       return {
         statusCode: 200,
+        headers: CORS_HEADERS,
         body: JSON.stringify({
           message: 'User already has a Stripe customer ID',
-          stripeCustomerId: updatedUserData.stripeCustomerId
+          stripeCustomerId: updatedUserData.stripeCustomerId,
         }),
       };
     }
@@ -77,16 +89,17 @@ exports.handler = async (event, context) => {
     // Otherwise, create a new Customer in Stripe
     const customer = await stripe.customers.create({
       email,
-      name
+      name,
     });
 
-    // Save the Stripe customer ID in Firebase
+    // Save to Firebase
     await userRef.update({
-      stripeCustomerId: customer.id
+      stripeCustomerId: customer.id,
     });
 
     return {
       statusCode: 200,
+      headers: CORS_HEADERS,
       body: JSON.stringify({
         message: 'Stripe customer created successfully',
         stripeCustomerId: customer.id,
@@ -96,6 +109,7 @@ exports.handler = async (event, context) => {
     console.error('Error creating Stripe customer', err);
     return {
       statusCode: 500,
+      headers: CORS_HEADERS,
       body: JSON.stringify({ error: err.message }),
     };
   }
