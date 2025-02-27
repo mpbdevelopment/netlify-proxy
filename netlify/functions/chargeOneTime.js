@@ -47,7 +47,6 @@ exports.handler = async (event, context) => {
       amount: amount,             // e.g. 500 for $5
       currency: 'usd',
       payment_method: paymentMethodId,
-      confirmation_method: 'manual', // or 'automatic'
       confirm: false,               // do not confirm here
       // Optionally add a receipt_email if you want automatic Stripe receipt:
       // receipt_email: userEmail
