@@ -50,8 +50,8 @@ exports.handler = async function (event) {
           quantity: 1,
         },
       ],
-      success_url: 'https://yourdomain.com/success',
-      cancel_url: 'https://yourdomain.com/cancel',
+      success_url: 'https://www.thepaddleproject.org/',
+      cancel_url: 'https://www.thepaddleproject.org/',
     });
 
     return {
