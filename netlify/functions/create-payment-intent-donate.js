@@ -1,77 +1,54 @@
-// netlify/functions/create-payment-intent.js
-const Stripe = require('stripe');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_DONATE);
 
-// Set STRIPE_SECRET_KEY in your Netlify environment variables
-// (Dashboard → Site settings → Environment variables)
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: '2024-06-20',
-});
-
-// Adjust this to your site origin if you want to lock down CORS
-const ALLOW_ORIGIN = process.env.CORS_ALLOW_ORIGIN || '*';
-
-exports.handler = async (event) => {
-  // Handle CORS preflight
-  if (event.httpMethod === 'OPTIONS') {
-    return {
-      statusCode: 200,
-      headers: {
-        'Access-Control-Allow-Origin': ALLOW_ORIGIN,
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-      },
-      body: '',
-    };
-  }
-
-  if (event.httpMethod !== 'POST') {
-    return {
-      statusCode: 405,
-      headers: { 'Access-Control-Allow-Origin': ALLOW_ORIGIN },
-      body: JSON.stringify({ error: 'Method not allowed' }),
-    };
-  }
-
+exports.handler = async function (event) {
   try {
-    const { amount, currency = 'usd' } = JSON.parse(event.body || '{}');
+    const { amount, coverFee } = JSON.parse(event.body);
 
-    // Basic validation
-    if (!Number.isInteger(amount) || amount < 50) {
+    // Ensure it's a positive integer (Stripe expects amount in cents)
+    const parsedAmount = parseFloat(amount);
+    if (!parsedAmount || parsedAmount <= 0) {
       return {
         statusCode: 400,
-        headers: { 'Access-Control-Allow-Origin': ALLOW_ORIGIN },
-        body: JSON.stringify({ error: 'Invalid amount (minimum $0.50)' }),
+        body: JSON.stringify({ error: 'Invalid amount.' }),
       };
     }
 
-    const paymentIntent = await stripe.paymentIntents.create(
-      {
-        amount, // in cents
-        currency,
-        // This enables cards + wallets (Apple Pay/Google Pay will appear via Elements)
-        automatic_payment_methods: { enabled: true },
-        metadata: { purpose: 'donation' },
-      },
-      // (Optional) idempotency to protect against double-clicks
-      { idempotencyKey: `pi_${amount}_${Date.now()}` }
-    );
+    // Calculate final amount in cents
+    let finalAmount = parsedAmount;
+    if (coverFee) {
+      finalAmount *= 1.03;
+    }
+
+    const roundedAmount = Math.round(finalAmount * 100); // in cents
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      mode: 'payment',
+      line_items: [
+        {
+          price_data: {
+            currency: 'usd',
+            product_data: {
+              name: 'Donation',
+            },
+            unit_amount: roundedAmount,
+          },
+          quantity: 1,
+        },
+      ],
+      success_url: 'https://yourdomain.com/success',
+      cancel_url: 'https://yourdomain.com/cancel',
+    });
 
     return {
       statusCode: 200,
-      headers: {
-        'Access-Control-Allow-Origin': ALLOW_ORIGIN,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ clientSecret: paymentIntent.client_secret }),
+      body: JSON.stringify({ url: session.url }),
     };
   } catch (err) {
+    console.error('Stripe error:', err);
     return {
       statusCode: 500,
-      headers: {
-        'Access-Control-Allow-Origin': ALLOW_ORIGIN,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ error: err.message }),
+      body: JSON.stringify({ error: 'Server error.' }),
     };
   }
 };
