@@ -1,25 +1,39 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_DONATE);
 
 exports.handler = async function (event) {
+  // Handle preflight request
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 200,
+      headers: {
+        'Access-Control-Allow-Origin': '*', // Or specify Squarespace domain instead of '*'
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      },
+      body: 'OK',
+    };
+  }
+
   try {
     const { amount, coverFee } = JSON.parse(event.body);
 
-    // Ensure it's a positive integer (Stripe expects amount in cents)
     const parsedAmount = parseFloat(amount);
     if (!parsedAmount || parsedAmount <= 0) {
       return {
         statusCode: 400,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+        },
         body: JSON.stringify({ error: 'Invalid amount.' }),
       };
     }
 
-    // Calculate final amount in cents
     let finalAmount = parsedAmount;
     if (coverFee) {
       finalAmount *= 1.03;
     }
 
-    const roundedAmount = Math.round(finalAmount * 100); // in cents
+    const roundedAmount = Math.round(finalAmount * 100);
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
@@ -42,13 +56,20 @@ exports.handler = async function (event) {
 
     return {
       statusCode: 200,
+      headers: {
+        'Access-Control-Allow-Origin': '*', // Replace with your Squarespace domain if needed
+      },
       body: JSON.stringify({ url: session.url }),
     };
   } catch (err) {
     console.error('Stripe error:', err);
     return {
       statusCode: 500,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+      },
       body: JSON.stringify({ error: 'Server error.' }),
     };
   }
 };
+
