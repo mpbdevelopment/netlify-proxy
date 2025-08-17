@@ -7,7 +7,7 @@ exports.handler = async function (event) {
     return {
       statusCode: 200,
       headers: {
-        'Access-Control-Allow-Origin': '*', // Consider restricting to your domain
+        'Access-Control-Allow-Origin': '*', // consider restricting to your domain
         'Access-Control-Allow-Headers': 'Content-Type',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
       },
@@ -28,10 +28,8 @@ exports.handler = async function (event) {
     const {
       amount,
       coverFee = false,
-      recurring = false,
-      interval = undefined, // 'year' when recurring
-      // Optional passthroughs you might add later:
-      // email, name, metadata = {}
+      recurring = false,     // true for yearly
+      interval = undefined,  // 'year' when recurring
     } = payload;
 
     // ---- Validate amount ----
@@ -44,22 +42,20 @@ exports.handler = async function (event) {
       };
     }
 
-    // ---- Calculate final amount (with optional 3% fee cover) ----
+    // ---- Apply optional 3% fee cover ----
     let finalAmount = parsedAmount;
     if (coverFee) finalAmount *= 1.03;
     const unitAmount = Math.round(finalAmount * 100); // cents
 
-    // ---- Determine mode & line item ----
-    const isSubscription = !!recurring && (interval === 'year'); // Only support yearly subs
+    // ---- Mode & line item ----
+    const isSubscription = !!recurring && interval === 'year';
     const mode = isSubscription ? 'subscription' : 'payment';
 
     const lineItem = isSubscription
       ? {
           price_data: {
             currency: 'usd',
-            product_data: {
-              name: 'Yearly Donation',
-            },
+            product_data: { name: 'Yearly Donation' },
             unit_amount: unitAmount,
             recurring: { interval: 'year' },
           },
@@ -68,37 +64,37 @@ exports.handler = async function (event) {
       : {
           price_data: {
             currency: 'usd',
-            product_data: {
-              name: 'Donation',
-            },
+            product_data: { name: 'Donation' },
             unit_amount: unitAmount,
           },
           quantity: 1,
         };
 
-    // ---- Create Checkout Session ----
-    const session = await stripe.checkout.sessions.create({
+    // ---- Build session params ----
+    const sessionParams = {
       mode,
-      payment_method_types: ['card'],
       line_items: [lineItem],
-
-      // Optional quality-of-life settings:
-      customer_creation: 'if_required', // lets Stripe create/reuse a Customer
+      // Cards by default; include explicitly if you like:
+      payment_method_types: ['card'],
       allow_promotion_codes: true,
       billing_address_collection: 'auto',
-
-      // Success/Cancel
       success_url: 'https://www.thepaddleproject.org/?checkout=success',
       cancel_url: 'https://www.thepaddleproject.org/?checkout=cancel',
-
-      // Useful tags for dashboards & webhooks
       metadata: {
         donationType: isSubscription ? 'recurring_yearly' : 'one_time',
         coverFee: coverFee ? 'true' : 'false',
-        baseAmount: String(Math.round(parsedAmount * 100)), // cents before fee cover
-        finalAmount: String(unitAmount), // cents after fee cover
+        baseAmount: String(Math.round(parsedAmount * 100)),
+        finalAmount: String(unitAmount),
       },
-    });
+    };
+
+    // IMPORTANT: Only add customer_creation for payment mode
+    if (!isSubscription) {
+      sessionParams.customer_creation = 'if_required';
+    }
+    // (In subscription mode, Checkout will create/reuse a Customer automatically.) :contentReference[oaicite:1]{index=1}
+
+    const session = await stripe.checkout.sessions.create(sessionParams);
 
     return {
       statusCode: 200,
