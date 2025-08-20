@@ -7,7 +7,7 @@ exports.handler = async function (event) {
     return {
       statusCode: 200,
       headers: {
-        'Access-Control-Allow-Origin': '*', // consider restricting to your domain
+        'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Headers': 'Content-Type',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
       },
@@ -24,77 +24,85 @@ exports.handler = async function (event) {
   }
 
   try {
-    const payload = JSON.parse(event.body || '{}');
-    const {
-      amount,
-      coverFee = false,
-      recurring = false,     // true for yearly
-      interval = undefined,  // 'year' when recurring
-    } = payload;
+    const { amount, coverFee = false, recurring = false, interval } = JSON.parse(event.body || '{}');
 
-    // ---- Validate amount ----
-    const parsedAmount = Number(amount);
-    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+    // ---- Validate & compute in cents (integer math) ----
+    const dollars = Number(amount);
+    if (!Number.isFinite(dollars) || dollars < 1) {
       return {
         statusCode: 400,
         headers: { 'Access-Control-Allow-Origin': '*' },
-        body: JSON.stringify({ error: 'Invalid amount.' }),
+        body: JSON.stringify({ error: 'Invalid amount. Minimum $1.' }),
       };
     }
+    const baseCents = Math.round(dollars * 100);
+    const feeCents = coverFee ? Math.round(baseCents * 3 / 100) : 0;
+    const unitAmount = baseCents + feeCents;
 
-    // ---- Apply optional 3% fee cover ----
-    let finalAmount = parsedAmount;
-    if (coverFee) finalAmount *= 1.03;
-    const unitAmount = Math.round(finalAmount * 100); // cents
+    const isSubscription = !!recurring && (interval === 'year' || interval === 'month' || interval === 'week' || interval === 'day');
+    const recurInterval = interval || 'year';
 
-    // ---- Mode & line item ----
-    const isSubscription = !!recurring && interval === 'year';
-    const mode = isSubscription ? 'subscription' : 'payment';
-
-    const lineItem = isSubscription
-      ? {
-          price_data: {
-            currency: 'usd',
-            product_data: { name: 'Yearly Donation' },
-            unit_amount: unitAmount,
-            recurring: { interval: 'year' },
-          },
-          quantity: 1,
-        }
-      : {
-          price_data: {
-            currency: 'usd',
-            product_data: { name: 'Donation' },
-            unit_amount: unitAmount,
-          },
-          quantity: 1,
-        };
-
-    // ---- Build session params ----
-    const sessionParams = {
-      mode,
-      line_items: [lineItem],
-      // Cards by default; include explicitly if you like:
-      payment_method_types: ['card'],
+    // Common Checkout options (hosted page handles Apple Pay/Google Pay/Link automatically)
+    const common = {
       allow_promotion_codes: true,
       billing_address_collection: 'auto',
-      success_url: 'https://www.thepaddleproject.org/?checkout=success',
+      success_url: 'https://www.thepaddleproject.org/?checkout=success&session_id={CHECKOUT_SESSION_ID}',
       cancel_url: 'https://www.thepaddleproject.org/?checkout=cancel',
-      metadata: {
-        donationType: isSubscription ? 'recurring_yearly' : 'one_time',
-        coverFee: coverFee ? 'true' : 'false',
-        baseAmount: String(Math.round(parsedAmount * 100)),
-        finalAmount: String(unitAmount),
-      },
+      // Don’t pin payment_method_types so Stripe can include wallets as appropriate.
+      // automatic_tax: { enabled: false }, // enable if needed later
     };
 
-    // IMPORTANT: Only add customer_creation for payment mode
-    if (!isSubscription) {
-      sessionParams.customer_creation = 'if_required';
-    }
-    // (In subscription mode, Checkout will create/reuse a Customer automatically.) :contentReference[oaicite:1]{index=1}
+    let session;
 
-    const session = await stripe.checkout.sessions.create(sessionParams);
+    if (!isSubscription) {
+      // ---------- ONE-TIME ----------
+      session = await stripe.checkout.sessions.create({
+        ...common,
+        mode: 'payment',
+        customer_creation: 'always', // ensures you get a Customer w/ email/name
+        line_items: [{
+          price_data: {
+            currency: 'usd',
+            unit_amount: unitAmount,
+            product_data: { name: 'Donation' },
+          },
+          quantity: 1,
+        }],
+        // Put metadata on the resulting PaymentIntent (visible in webhook)
+        payment_intent_data: {
+          metadata: {
+            donationType: 'one_time',
+            coverFee: coverFee ? 'true' : 'false',
+            baseAmount: String(baseCents),
+            finalAmount: String(unitAmount),
+          },
+        },
+      });
+    } else {
+      // ---------- RECURRING ----------
+      session = await stripe.checkout.sessions.create({
+        ...common,
+        mode: 'subscription',
+        line_items: [{
+          price_data: {
+            currency: 'usd',
+            unit_amount: unitAmount,
+            recurring: { interval: recurInterval },
+            product_data: { name: `Donation (${recurInterval})` },
+          },
+          quantity: 1,
+        }],
+        // Put metadata on the Subscription (and first invoice/PI will inherit context)
+        subscription_data: {
+          metadata: {
+            donationType: `recurring_${recurInterval}`,
+            coverFee: coverFee ? 'true' : 'false',
+            baseAmount: String(baseCents),
+            finalAmount: String(unitAmount),
+          },
+        },
+      });
+    }
 
     return {
       statusCode: 200,
@@ -110,4 +118,3 @@ exports.handler = async function (event) {
     };
   }
 };
-
