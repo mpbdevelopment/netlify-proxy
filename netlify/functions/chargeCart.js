@@ -6,11 +6,7 @@ exports.handler = async (event, context) => {
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 200,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS'
-      },
+      headers: corsHeaders(),
       body: ''
     };
   }
@@ -28,8 +24,7 @@ exports.handler = async (event, context) => {
     return corsResponse(400, { error: 'Invalid JSON in request body.' });
   }
 
-  const { email, amount } = body; 
-  // amount in cents (e.g., 500 => $5.00)
+  const { email, amount, transferAmounts } = body; // transferAmounts: array of integers (cents)
   if (!email || !amount) {
     return corsResponse(400, { error: 'Missing email or amount.' });
   }
@@ -41,9 +36,25 @@ exports.handler = async (event, context) => {
   }
   const stripe = Stripe(stripeKey);
 
+  // 5) Parse and validate transfer inputs against env
+  const {
+    connectedAccountIds,
+    parsedTransferAmounts,
+    totalTransferAmount,
+    validationError
+  } = parseAndValidateTransfers(transferAmounts);
+
+  if (validationError) {
+    return corsResponse(400, { error: validationError });
+  }
+
+  if (totalTransferAmount > amount) {
+    return corsResponse(400, { error: 'Sum of transferAmounts cannot exceed total amount.' });
+  }
+
+  // 6) Proceed
   try {
-    // 5) Search for the Stripe customer by email
-    //    We find the default payment method from invoice_settings
+    // Find the Stripe customer by email
     const customerResp = await stripe.customers.search({
       query: `email:"${email}"`,
       limit: 1
@@ -53,48 +64,161 @@ exports.handler = async (event, context) => {
     }
     const customer = customerResp.data[0];
 
-    // 6) Off-session Payment Intent with default payment method
-    const defaultPM = customer.invoice_settings.default_payment_method;
+    // Get customer's default payment method
+    const defaultPM = customer.invoice_settings?.default_payment_method;
     if (!defaultPM) {
       return corsResponse(200, { success: false, error: 'No default payment method found for this customer.' });
     }
 
-    // 7) Create a Payment Intent for the total cart amount (in cents)
-    //    confirm=true => immediate attempt
-    //    off_session=true => no user action required
+    // Create a PaymentIntent for the total amount
+    const orderId = `order_${Date.now()}`;
+    const splits = makeSplitsJSON(connectedAccountIds, parsedTransferAmounts);
+
     const paymentIntent = await stripe.paymentIntents.create({
-      amount: amount,               // e.g., 500 means $5.00
-      currency: 'usd',             // or your currency
+      amount: amount,      // e.g., 500 means $5.00
+      currency: 'usd',
       customer: customer.id,
       payment_method: defaultPM,
       off_session: true,
-      confirm: true
+      confirm: true,
+      transfer_group: orderId,
+      metadata: {
+        // stash split details so webhooks/reporting can inspect later
+        splits_json: JSON.stringify(splits),
+        total_transfer_amount: String(totalTransferAmount)
+      }
     });
 
-    // If confirm succeeded => status= 'succeeded' or 'requires_...' in some cases
-    if (paymentIntent.status === 'succeeded') {
-      // Payment successful
-      return corsResponse(200, { success: true });
-    } else {
-      // Possibly requires user action => we treat as an error in your flow
+    if (paymentIntent.status !== 'succeeded') {
       return corsResponse(200, { success: false, error: 'Payment not succeeded. Status=' + paymentIntent.status });
     }
 
+    // 7) Create transfers immediately (optional but convenient here since we already confirmed)
+    const chargeId = paymentIntent.latest_charge;
+    const createdTransfers = [];
+    const transferErrors = [];
+
+    if (totalTransferAmount > 0) {
+      for (let i = 0; i < parsedTransferAmounts.length; i++) {
+        const amt = parsedTransferAmounts[i];
+        const dest = connectedAccountIds[i];
+        if (amt > 0) {
+          try {
+            const tr = await stripe.transfers.create({
+              amount: amt,
+              currency: paymentIntent.currency,
+              destination: dest,
+              transfer_group: orderId,
+              source_transaction: chargeId,
+              description: `Split ${i + 1}/${parsedTransferAmounts.length} for ${orderId}`
+            }, { idempotencyKey: `tr_${paymentIntent.id}_${i}` });
+            createdTransfers.push({ id: tr.id, amount: tr.amount, destination: tr.destination });
+          } catch (err) {
+            transferErrors.push({ destination: dest, amount: amt, error: err.message });
+          }
+        }
+      }
+    }
+
+    const platformRetainedAmount = amount - totalTransferAmount;
+
+    // 8) Response
+    return corsResponse(200, {
+      success: true,
+      paymentIntentId: paymentIntent.id,
+      transferGroup: orderId,
+      chargeId,
+      transfersCreated: createdTransfers,
+      transferErrors,
+      platformRetainedAmount
+    });
+
   } catch (err) {
-    // If the PaymentIntent fails for any reason => show error
     return corsResponse(500, { success: false, error: err.message });
   }
 };
 
-// Helper for consistent CORS
+// Helpers
+function corsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS'
+  };
+}
+
 function corsResponse(statusCode, bodyObj) {
   return {
     statusCode,
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS'
-    },
+    headers: corsHeaders(),
     body: JSON.stringify(bodyObj)
   };
+}
+
+function parseAndValidateTransfers(transferAmounts) {
+  const connectedIdsEnv = process.env.CONNECTED_ACCOUNT_IDS || '';
+  const connectedAccountIds = connectedIdsEnv
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  // If no transferAmounts provided, treat as zero transfers.
+  if (!transferAmounts || !Array.isArray(transferAmounts) || transferAmounts.length === 0) {
+    return {
+      connectedAccountIds,
+      parsedTransferAmounts: [],
+      totalTransferAmount: 0,
+      validationError: null
+    };
+  }
+
+  // Validate format
+  const parsed = [];
+  for (const a of transferAmounts) {
+    const n = Number(a);
+    if (!Number.isInteger(n) || n < 0) {
+      return {
+        connectedAccountIds,
+        parsedTransferAmounts: [],
+        totalTransferAmount: 0,
+        validationError: 'transferAmounts must be an array of non-negative integers (cents).'
+      };
+    }
+    parsed.push(n);
+  }
+
+  if (connectedAccountIds.length === 0) {
+    return {
+      connectedAccountIds,
+      parsedTransferAmounts: [],
+      totalTransferAmount: 0,
+      validationError: 'CONNECTED_ACCOUNT_IDS env var is empty or missing.'
+    };
+  }
+
+  if (parsed.length !== connectedAccountIds.length) {
+    return {
+      connectedAccountIds,
+      parsedTransferAmounts: [],
+      totalTransferAmount: 0,
+      validationError: `transferAmounts length (${parsed.length}) must match number of CONNECTED_ACCOUNT_IDS (${connectedAccountIds.length}).`
+    };
+  }
+
+  const total = parsed.reduce((sum, n) => sum + n, 0);
+
+  return {
+    connectedAccountIds,
+    parsedTransferAmounts: parsed,
+    totalTransferAmount: total,
+    validationError: null
+  };
+}
+
+function makeSplitsJSON(connectedAccountIds, amounts) {
+  if (!connectedAccountIds || !amounts || connectedAccountIds.length !== amounts.length) return [];
+  return connectedAccountIds.map((acct, i) => ({
+    destination_account: acct,
+    amount: amounts[i]
+  }));
 }
